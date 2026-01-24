@@ -5,13 +5,14 @@
 //!
 //! # Architecture
 //!
-//! - **Execution Lanes**: Venue-based routing with bounded queues
+//! - **Venue Executors**: Direct task spawning for parallel leg execution
 //! - **Order State Machine**: Lifecycle management with state transitions
-//! - **Arbitrage Coordinator**: Multi-leg execution with atomicity guarantees
+//! - **Arbitrage Coordinator**: Multi-leg execution with coordinated cancellation
+//! - **Coordinated Cancellation**: tokio::select! + abort() for instant rollback
 //! - **Venue Simulator**: Configurable latency and response simulation
 
-pub mod core;
 pub mod coordinator;
+pub mod core;
 pub mod db;
 pub mod execution;
 pub mod recovery;
@@ -22,4 +23,3 @@ pub mod venue;
 
 pub use execution::engine::DryTestingEngine;
 pub use types::errors::{DryTestingError, Result};
-

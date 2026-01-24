@@ -5,6 +5,22 @@ use thiserror::Error;
 /// Result type alias for the dry testing engine
 pub type Result<T> = std::result::Result<T, DryTestingError>;
 
+/// Fixed-point arithmetic errors
+#[derive(Error, Debug)]
+pub enum FixedPointError {
+    #[error("Overflow in fixed-point arithmetic")]
+    Overflow,
+
+    #[error("Underflow in fixed-point arithmetic")]
+    Underflow,
+
+    #[error("Division by zero")]
+    DivisionByZero,
+
+    #[error("Scale mismatch: {0} != {1}")]
+    ScaleMismatch(i16, i16),
+}
+
 /// Main error type for the dry testing engine
 #[derive(Error, Debug)]
 pub enum DryTestingError {
@@ -49,6 +65,9 @@ pub enum DryTestingError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Fixed-point arithmetic error: {0}")]
+    FixedPoint(#[from] FixedPointError),
 }
 
 /// Lane-specific errors
@@ -88,6 +107,9 @@ pub enum CoordinatorError {
 
     #[error("Timeout: {0}")]
     Timeout(String),
+
+    #[error("Unknown venue: {0}")]
+    UnknownVenue(String),
 }
 
 /// Venue adapter errors
@@ -101,6 +123,9 @@ pub enum VenueError {
 
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
+
+    #[error("Operation timed out: {0}")]
+    Timeout(String),
 }
 
 /// Routing errors
@@ -115,4 +140,3 @@ pub enum RoutingError {
     #[error("Client order ID not found: {0}")]
     ClientOrderIdNotFound(String),
 }
-

@@ -13,10 +13,10 @@ use uuid::Uuid;
 pub struct OrderStateMachine {
     /// Active orders cache
     active_orders: Arc<DashMap<Uuid, OrderState>>,
-    
+
     /// Order router for event routing
     order_router: Arc<OrderRouter>,
-    
+
     /// Database writer for persistence
     db_writer: Arc<DatabaseWriter>,
 }
@@ -33,7 +33,7 @@ impl OrderStateMachine {
             db_writer,
         })
     }
-    
+
     /// Process an event and transition state
     pub async fn process_event(
         &self,
@@ -41,9 +41,12 @@ impl OrderStateMachine {
         event: EventSource,
     ) -> Result<StateTransition> {
         let mut order = self.get_order_mut(order_id)?;
-        
+
         let transition = match event {
-            EventSource::VenueAck { venue_order_id, timestamp } => {
+            EventSource::VenueAck {
+                venue_order_id,
+                timestamp,
+            } => {
                 // pending → submitted
                 if order.status == OrderStatus::Pending {
                     order.status = OrderStatus::Submitted;
@@ -55,26 +58,35 @@ impl OrderStateMachine {
                         source: "venue_ack".to_string(),
                     }
                 } else {
-                    return Err(StateMachineError::InvalidTransition(
-                        format!("Cannot ACK order in {:?} state", order.status)
-                    ).into());
+                    return Err(StateMachineError::InvalidTransition(format!(
+                        "Cannot ACK order in {:?} state",
+                        order.status
+                    ))
+                    .into());
                 }
             }
-            EventSource::VenueFill { fill_size, fill_price, trade_id, timestamp, .. } => {
+            EventSource::VenueFill {
+                fill_size,
+                fill_price: _,
+                trade_id,
+                timestamp,
+                ..
+            } => {
                 // submitted/partial → partial/filled
+                // Use total_size_int and total_size_scale from OrderState for proper comparison
                 let new_filled = order.filled_size_int + fill_size.0;
-                let total_size = order.filled_size_int; // TODO: Get from order
-                
-                let new_status = if new_filled >= total_size {
+
+                // Compare filled size with total size (both use same scale)
+                let new_status = if new_filled >= order.total_size_int {
                     OrderStatus::Filled
                 } else {
                     OrderStatus::Partial
                 };
-                
+
                 let from_status = order.status;
                 order.status = new_status;
                 order.filled_size_int = new_filled;
-                
+
                 StateTransition {
                     from: from_status,
                     to: new_status,
@@ -82,7 +94,11 @@ impl OrderStateMachine {
                     source: format!("venue_fill_{}", trade_id),
                 }
             }
-            EventSource::VenueReject { reason, timestamp } => {
+            EventSource::VenueReject {
+                reason,
+                timestamp,
+                venue_order_id: _,
+            } => {
                 // any → rejected
                 let from_status = order.status;
                 order.status = OrderStatus::Rejected;
@@ -93,7 +109,10 @@ impl OrderStateMachine {
                     source: format!("venue_reject: {}", reason),
                 }
             }
-            EventSource::CoordinatorTimeout { timestamp } => {
+            EventSource::CoordinatorTimeout {
+                timestamp,
+                order_id: _,
+            } => {
                 // any → canceled
                 let from_status = order.status;
                 order.status = OrderStatus::Canceled;
@@ -104,7 +123,11 @@ impl OrderStateMachine {
                     source: "coordinator_timeout".to_string(),
                 }
             }
-            EventSource::CoordinatorCancel { reason, timestamp } => {
+            EventSource::CoordinatorCancel {
+                reason,
+                timestamp,
+                order_id: _,
+            } => {
                 // any → canceled
                 let from_status = order.status;
                 order.status = OrderStatus::Canceled;
@@ -116,16 +139,18 @@ impl OrderStateMachine {
                 }
             }
         };
-        
+
         order.transitions.push(transition.clone());
         order.updated_at = chrono::Utc::now();
-        
+
         // Queue transition for DB write (batched)
-        self.db_writer.queue_transition(order_id, transition.clone()).await?;
-        
+        self.db_writer
+            .queue_transition(order_id, transition.clone())
+            .await?;
+
         Ok(transition)
     }
-    
+
     /// Get order state (immutable)
     pub fn get_order(&self, order_id: Uuid) -> Result<OrderState> {
         self.active_orders
@@ -133,18 +158,20 @@ impl OrderStateMachine {
             .map(|entry| entry.value().clone())
             .ok_or_else(|| StateMachineError::OrderNotFound(order_id).into())
     }
-    
+
     /// Get order state (mutable)
-    fn get_order_mut(&self, order_id: Uuid) -> Result<dashmap::mapref::one::RefMut<'_, Uuid, OrderState>> {
+    fn get_order_mut(
+        &self,
+        order_id: Uuid,
+    ) -> Result<dashmap::mapref::one::RefMut<'_, Uuid, OrderState>> {
         self.active_orders
             .get_mut(&order_id)
             .ok_or_else(|| StateMachineError::OrderNotFound(order_id).into())
     }
-    
+
     /// Restore order state (for recovery)
     pub async fn restore_order(&self, order: OrderState) -> Result<()> {
         self.active_orders.insert(order.order_id, order);
         Ok(())
     }
 }
-

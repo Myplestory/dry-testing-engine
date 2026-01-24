@@ -3,7 +3,7 @@
 //! Main entry point for running the dry testing engine as a standalone application.
 
 use dry_testing_engine::DryTestingEngine;
-use tracing::{info, error};
+use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -33,4 +33,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-

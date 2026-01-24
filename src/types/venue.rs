@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 /// Venue type enumeration
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum VenueType {
     Polymarket,
     Kalshi,
@@ -26,7 +27,7 @@ impl VenueType {
             VenueType::Other(name) => name.as_str(),
         }
     }
-    
+
     /// Get array index for fast path routing (returns None for Other)
     pub fn array_index(&self) -> Option<usize> {
         match self {
@@ -61,27 +62,10 @@ impl From<VenueType> for String {
     }
 }
 
-/// Venue response from order submission
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum VenueResponse {
-    /// Order acknowledged
-    Ack {
-        venue_order_id: String,
-    },
-    
-    /// Order filled (partial or full)
-    Fill {
-        venue_order_id: String,
-        fill_size: (i64, i16),  // (int, scale)
-        fill_price: (i64, i16), // (int, scale)
-        trade_id: String,
-    },
-    
-    /// Order rejected
-    Reject {
-        venue_order_id: Option<String>,
-        reason: String,
-    },
+impl std::fmt::Display for VenueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 /// Venue event (from WebSocket or polling)
@@ -89,16 +73,16 @@ pub enum VenueResponse {
 pub struct VenueEvent {
     /// Venue type
     pub venue: VenueType,
-    
+
     /// Venue order ID (if available)
     pub venue_order_id: Option<String>,
-    
+
     /// Client order ID (if available, for pre-ACK routing)
     pub client_order_id: Option<String>,
-    
+
     /// Event type
     pub event_type: VenueEventType,
-    
+
     /// Event timestamp
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
@@ -117,4 +101,3 @@ pub enum VenueEventType {
     },
     Cancel,
 }
-

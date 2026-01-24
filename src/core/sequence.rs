@@ -15,22 +15,27 @@ impl SequenceGenerator {
             counter: AtomicU64::new(0),
         }
     }
-    
+
     /// Create a new sequence generator starting at a specific value
     pub fn with_initial(initial: u64) -> Self {
         Self {
             counter: AtomicU64::new(initial),
         }
     }
-    
+
     /// Get the next sequence number (monotonically increasing)
     pub fn next(&self) -> u64 {
         self.counter.fetch_add(1, Ordering::SeqCst)
     }
-    
+
     /// Get the current sequence number without incrementing
     pub fn current(&self) -> u64 {
         self.counter.load(Ordering::SeqCst)
+    }
+
+    /// Reset sequence to a specific value (for testing/recovery)
+    pub fn reset(&self, value: u64) {
+        self.counter.store(value, Ordering::SeqCst);
     }
 }
 
@@ -45,24 +50,24 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
-    
+
     #[test]
     fn test_sequence_monotonicity() {
         let gen = SequenceGenerator::new();
         let mut prev = gen.next();
-        
+
         for _ in 0..1000 {
             let next = gen.next();
             assert!(next > prev, "Sequence must be monotonically increasing");
             prev = next;
         }
     }
-    
+
     #[test]
     fn test_sequence_thread_safety() {
         let gen = Arc::new(SequenceGenerator::new());
         let mut handles = vec![];
-        
+
         // Spawn 10 threads, each generating 1000 sequence numbers
         for _ in 0..10 {
             let gen = gen.clone();
@@ -75,18 +80,21 @@ mod tests {
             });
             handles.push(handle);
         }
-        
+
         // Collect all sequence numbers
         let mut all_numbers: Vec<u64> = handles
             .into_iter()
             .flat_map(|h| h.join().unwrap())
             .collect();
-        
+
         // Verify all numbers are unique
         all_numbers.sort();
         for i in 1..all_numbers.len() {
-            assert_ne!(all_numbers[i], all_numbers[i - 1], "All sequence numbers must be unique");
+            assert_ne!(
+                all_numbers[i],
+                all_numbers[i - 1],
+                "All sequence numbers must be unique"
+            );
         }
     }
 }
-

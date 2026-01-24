@@ -56,10 +56,6 @@ mockall = "0.12"
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 [[bench]]
-name = "execution_lanes"
-harness = false
-
-[[bench]]
 name = "state_machine"
 harness = false
 

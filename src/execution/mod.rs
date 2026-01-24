@@ -1,11 +1,9 @@
-//! Execution lanes and routing
+//! Execution routing and direct task spawning
 
 pub mod engine;
-pub mod lane;
-pub mod metrics;
+pub mod executor;
 pub mod router;
 
 pub use engine::DryTestingEngine;
-pub use lane::ExecutionLane;
+pub use executor::{LegExecutionResult, VenueExecutor};
 pub use router::ExecutionLaneRouter;
-
