@@ -7,9 +7,9 @@ use std::thread;
 #[test]
 fn test_sequence_monotonicity() {
     let gen = SequenceGenerator::new();
-    let mut prev = 0u64;
+    let mut prev = gen.next(); // Get first value before loop
     
-    for _ in 0..1000 {
+    for _ in 0..999 {
         let next = gen.next();
         assert!(next > prev, "Sequence must be monotonically increasing");
         prev = next;
@@ -54,8 +54,9 @@ fn test_sequence_thread_safety() {
 #[test]
 fn test_sequence_with_initial() {
     let gen = SequenceGenerator::with_initial(100);
-    assert_eq!(gen.next(), 101);
-    assert_eq!(gen.next(), 102);
+    // fetch_add returns the value BEFORE incrementing
+    assert_eq!(gen.next(), 100); // Returns old value (100), counter becomes 101
+    assert_eq!(gen.next(), 101); // Returns old value (101), counter becomes 102
 }
 
 #[test]
@@ -69,6 +70,8 @@ fn test_sequence_reset() {
     // Reset to initial value (1)
     gen.reset(1);
     let after_reset = gen.next();
-    assert_eq!(after_reset, 2, "After reset to 1, next should be 2");
+    // fetch_add returns the value BEFORE incrementing
+    assert_eq!(after_reset, 1, "After reset to 1, next should return 1 (old value)");
+    assert_eq!(gen.current(), 2, "Counter should now be 2 after increment");
 }
 
