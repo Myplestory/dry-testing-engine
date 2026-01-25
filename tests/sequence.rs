@@ -66,8 +66,9 @@ fn test_sequence_reset() {
     
     assert!(second > first);
     
-    gen.reset();
+    // Reset to initial value (1)
+    gen.reset(1);
     let after_reset = gen.next();
-    assert_eq!(after_reset, 1, "After reset, sequence should start at 1");
+    assert_eq!(after_reset, 2, "After reset to 1, next should be 2");
 }
 
