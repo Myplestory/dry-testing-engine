@@ -81,6 +81,15 @@ impl OrderStateMachine {
                 ..
             } => {
                 // submitted/partial → partial/filled
+                // Validate state before processing (industry standard for correctness)
+                if order.status != OrderStatus::Submitted && order.status != OrderStatus::Partial {
+                    return Err(StateMachineError::InvalidTransition(format!(
+                        "Cannot FILL order in {:?} state (must be Submitted or Partial)",
+                        order.status
+                    ))
+                    .into());
+                }
+                
                 // Use total_size_int and total_size_scale from OrderState for proper comparison
                 let new_filled = order.filled_size_int + fill_size.0;
 
