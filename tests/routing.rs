@@ -12,8 +12,9 @@ use chrono::Utc;
 async fn test_router_sequence_monotonicity() {
     // Test sequence generator directly (router uses it internally)
     let gen = SequenceGenerator::new();
-    let mut prev_seq = 0u64;
-    for _ in 0..10 {
+    let mut prev_seq = gen.next(); // Get first value before loop
+    
+    for _ in 0..9 {
         let seq = gen.next();
         assert!(seq > prev_seq, "Sequence numbers must be monotonically increasing");
         prev_seq = seq;

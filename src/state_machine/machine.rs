@@ -7,6 +7,7 @@ use crate::types::errors::{Result, StateMachineError};
 use crate::types::order::{OrderState, OrderStatus, StateTransition};
 use dashmap::DashMap;
 use std::sync::Arc;
+use tracing::debug;
 use uuid::Uuid;
 
 /// Order state machine for managing order lifecycle
@@ -41,6 +42,13 @@ impl OrderStateMachine {
         event: EventSource,
     ) -> Result<StateTransition> {
         let mut order = self.get_order_mut(order_id)?;
+
+        debug!(
+            order_id = %order_id,
+            current_status = ?order.status,
+            event = ?event,
+            "Processing state machine event"
+        );
 
         let transition = match event {
             EventSource::VenueAck {
@@ -142,6 +150,13 @@ impl OrderStateMachine {
 
         order.transitions.push(transition.clone());
         order.updated_at = chrono::Utc::now();
+
+        debug!(
+            order_id = %order_id,
+            transition = ?transition,
+            new_status = ?order.status,
+            "State transition completed"
+        );
 
         // Queue transition for DB write (batched)
         self.db_writer

@@ -14,7 +14,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 /// Coordinates multi-leg arbitrage execution
@@ -79,6 +79,13 @@ impl ArbExecutionCoordinator {
 
     /// Enqueue an execution intent
     pub async fn enqueue_intent(&self, intent: ArbExecutionIntent) -> Result<()> {
+        info!(
+            intent_id = %intent.intent_id,
+            sequence = intent.sequence_number,
+            pair_id = %intent.pair_id,
+            "Coordinator received intent, spawning leg execution tasks"
+        );
+
         // Validate intent
         intent.validate().map_err(|e| {
             DryTestingError::Coordinator(CoordinatorError::CompensationFailed(format!(
@@ -89,6 +96,15 @@ impl ArbExecutionCoordinator {
 
         // Generate client_order_ids for both legs
         let (client_order_id_a, client_order_id_b) = intent.generate_client_order_ids();
+
+        debug!(
+            intent_id = %intent.intent_id,
+            leg_a_venue = ?intent.leg_a.venue,
+            leg_b_venue = ?intent.leg_b.venue,
+            client_order_id_a = %client_order_id_a,
+            client_order_id_b = %client_order_id_b,
+            "Spawning parallel leg execution"
+        );
 
         // Create Order for Leg A
         let order_a = Order {
@@ -207,15 +223,38 @@ impl ArbExecutionCoordinator {
         let intent_id = intent.intent_id;
 
         // Spawn both legs as independent tasks
+        info!(
+            intent_id = %intent_id,
+            order_a_id = %order_a.id,
+            order_b_id = %order_b.id,
+            "Spawning parallel leg execution tasks"
+        );
+
+        let intent_id_a = intent_id;
+        let intent_id_b = intent_id;
         let mut handle_a = tokio::spawn(async move {
+            debug!(
+                intent_id = %intent_id_a,
+                order_id = %order_a_clone.id,
+                leg = "A",
+                venue = ?order_a_clone.venue,
+                "Starting leg A execution task"
+            );
             executor_a
-                .execute_leg(order_a_clone, OrderLeg::A, intent_id)
+                .execute_leg(order_a_clone, OrderLeg::A, intent_id_a)
                 .await
         });
 
         let mut handle_b = tokio::spawn(async move {
+            debug!(
+                intent_id = %intent_id_b,
+                order_id = %order_b_clone.id,
+                leg = "B",
+                venue = ?order_b_clone.venue,
+                "Starting leg B execution task"
+            );
             executor_b
-                .execute_leg(order_b_clone, OrderLeg::B, intent_id)
+                .execute_leg(order_b_clone, OrderLeg::B, intent_id_b)
                 .await
         });
 
@@ -244,8 +283,9 @@ impl ArbExecutionCoordinator {
         };
 
         info!(
-            "Execution {} completed with status: {:?}",
-            intent_id, final_status
+            intent_id = %intent_id,
+            final_status = ?final_status,
+            "Execution completed"
         );
         Ok(())
     }
@@ -287,6 +327,15 @@ impl ArbExecutionCoordinator {
             .get_mut(&intent_id)
             .ok_or_else(|| CoordinatorError::ExecutionNotFound(intent_id))?;
 
+        debug!(
+            intent_id = %intent_id,
+            leg = ?leg,
+            new_status = ?new_status,
+            leg_a_state = ?execution.leg_a_state,
+            leg_b_state = ?execution.leg_b_state,
+            "Updating execution leg state"
+        );
+
         // Update leg state
         match leg {
             OrderLeg::A => execution.leg_a_state = new_status,
@@ -296,6 +345,14 @@ impl ArbExecutionCoordinator {
         // Evaluate overall status
         let new_status = self.evaluate_execution_status(&execution);
         execution.status = new_status;
+
+        info!(
+            intent_id = %intent_id,
+            leg = ?leg,
+            leg_status = ?new_status,
+            overall_status = ?execution.status,
+            "Execution status updated"
+        );
 
         // TODO: Persist update
 
@@ -329,13 +386,31 @@ impl ArbExecutionCoordinator {
         other_order_id: Uuid,
         intent_id: Uuid,
     ) -> Result<ArbExecutionStatus> {
+        info!(
+            intent_id = %intent_id,
+            completed_leg = ?completed_leg,
+            completed_order_id = %completed_order_id,
+            "Leg completed, waiting for other leg"
+        );
+
         match result {
             Ok(Ok(LegExecutionResult::Filled)) | Ok(Ok(LegExecutionResult::Acknowledged)) => {
+                debug!(
+                    intent_id = %intent_id,
+                    completed_leg = ?completed_leg,
+                    result = ?result,
+                    "First leg succeeded, waiting for other leg"
+                );
+
                 // This leg succeeded - wait for other leg
                 match other_handle.await {
                     Ok(Ok(LegExecutionResult::Filled))
                     | Ok(Ok(LegExecutionResult::Acknowledged)) => {
                         // Both succeeded - COMPLETED
+                        info!(
+                            intent_id = %intent_id,
+                            "Both legs succeeded - execution COMPLETED"
+                        );
                         let other_leg = match completed_leg {
                             OrderLeg::A => OrderLeg::B,
                             OrderLeg::B => OrderLeg::A,
@@ -346,6 +421,12 @@ impl ArbExecutionCoordinator {
                     }
                     Ok(Ok(LegExecutionResult::Rejected)) | Ok(Err(_)) | Err(_) => {
                         // Other leg failed - rollback this leg (handle already consumed by await)
+                        info!(
+                            intent_id = %intent_id,
+                            completed_leg = ?completed_leg,
+                            other_order_id = %other_order_id,
+                            "Other leg failed - rolling back completed leg"
+                        );
                         self.cancel_order(
                             completed_order_id,
                             "Rollback: other leg failed".to_string(),
