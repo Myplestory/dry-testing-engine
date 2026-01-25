@@ -6,22 +6,27 @@ use dry_testing_engine::state_machine::events::EventSource;
 use dry_testing_engine::state_machine::OrderStateMachine;
 use dry_testing_engine::types::order::{OrderLeg, OrderStatus};
 use dry_testing_engine::types::venue::VenueType;
-use sqlx::PgPool;
 use std::sync::Arc;
+use std::env;
 use uuid::Uuid;
 use chrono::Utc;
 
 // Helper to create a test state machine (without database)
 async fn create_test_state_machine() -> OrderStateMachine {
+    // Load .env file from dry_testing_engine directory
+    let _ = dotenv::dotenv();
+    
+    // Get DATABASE_URL from environment
+    let database_url = env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set in .env file");
+    
     let order_router = Arc::new(OrderRouter::new());
     // Create a minimal database writer (will fail on actual writes, but that's ok for unit tests)
     let db = Arc::new(
-        sqlx::PgPool::connect("postgresql://test:test@localhost:5432/test")
+        sqlx::PgPool::connect(&database_url)
             .await
-            .unwrap_or_else(|_| {
-                // If database connection fails, we'll still test state transitions
-                // The actual DB writes will fail, but state machine logic will work
-                panic!("Test database connection failed - tests require a test database");
+            .unwrap_or_else(|e| {
+                panic!("Test database connection failed: {}. Make sure DATABASE_URL in .env is correct and database is accessible.", e);
             })
     );
     let db_writer = Arc::new(DatabaseWriter::new(db.clone()).await.unwrap());
