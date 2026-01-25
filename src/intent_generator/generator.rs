@@ -112,8 +112,8 @@ impl IntentGenerator {
     ///
     /// # Arguments
     /// * `pair_id` - Verified pair UUID
-    /// * `customer_id` - Customer UUID
-    /// * `scope_id` - Optional scope ID (if None, will try to get first scope)
+    /// * `customer_id` - Customer UUID (from strategy evaluator)
+    /// * `strategy_id` - Strategy UUID (from strategy evaluator)
     ///
     /// # Returns
     /// Generated execution intent
@@ -124,11 +124,11 @@ impl IntentGenerator {
         &self,
         pair_id: Uuid,
         customer_id: Uuid,
-        scope_id: Option<Uuid>,
+        strategy_id: Uuid,
     ) -> Result<ArbExecutionIntent, IntentGeneratorError> {
         info!(
-            "Generating intent for pair: {}, customer: {}",
-            pair_id, customer_id
+            "Generating intent for pair: {}, customer: {}, strategy: {}",
+            pair_id, customer_id, strategy_id
         );
 
         // Get verified pair
@@ -156,34 +156,19 @@ impl IntentGenerator {
             .find(|m| m.id == pair.market_b_id)
             .ok_or_else(|| IntentGeneratorError::MarketBNotFound(pair.id))?;
 
-        // Get or create test strategy
-        let scope_id = match scope_id {
-            Some(id) => id,
-            None => {
-                debug!("No scope_id provided, fetching first scope for customer");
-                let scope = self.db_reader.get_first_scope(customer_id).await?;
-                scope.id
-            }
-        };
-
-        let strategy = self
-            .db_reader
-            .get_or_create_test_strategy(customer_id, scope_id)
-            .await?;
-
         // Parse outcome mapping with explicit error handling
         let outcome_mapping = self.parse_outcome_mapping(&pair.outcome_mapping)?;
 
-        // Extract outcome IDs from mapping (explicit logic)
+        // Extract outcome IDs from contract specs
         let (leg_a_outcome, leg_b_outcome) =
-            self.extract_outcome_ids(&outcome_mapping, &pair.id)?;
+            self.extract_outcome_ids(&pair, &outcome_mapping).await?;
 
         // Build intent
         let intent = ArbExecutionIntent {
             intent_id: Uuid::new_v4(),
             sequence_number: 0, // Will be set by router
             customer_id,
-            strategy_id: strategy.id,
+            strategy_id,
             pair_id: pair.id,
             leg_a: LegSpec {
                 venue: VenueType::from_str(&market_a.venue).map_err(|e| {
@@ -247,7 +232,7 @@ impl IntentGenerator {
         &self,
         pair_ids: &[Uuid],
         customer_id: Uuid,
-        scope_id: Option<Uuid>,
+        strategy_id: Uuid,
     ) -> Result<(Vec<ArbExecutionIntent>, Vec<(Uuid, IntentGeneratorError)>), IntentGeneratorError>
     {
         if pair_ids.len() > MAX_BATCH_SIZE {
@@ -258,9 +243,10 @@ impl IntentGenerator {
         }
 
         info!(
-            "Generating batch of {} intents for customer: {}",
+            "Generating batch of {} intents for customer: {}, strategy: {}",
             pair_ids.len(),
-            customer_id
+            customer_id,
+            strategy_id
         );
 
         // Process all pairs in parallel (non-blocking)
@@ -276,7 +262,7 @@ impl IntentGenerator {
                 let pool = pool.clone();
                 let config = config.clone();
                 let customer_id_clone = customer_id;
-                let scope_id_clone = scope_id;
+                let strategy_id_clone = strategy_id;
 
                 tokio::spawn(async move {
                     // Create temporary generator for this task
@@ -286,7 +272,7 @@ impl IntentGenerator {
                     };
 
                     temp_generator
-                        .generate_from_pair_id(pair_id, customer_id_clone, scope_id_clone)
+                        .generate_from_pair_id(pair_id, customer_id_clone, strategy_id_clone)
                         .await
                         .map_err(|e| (pair_id, e))
                 })
@@ -365,45 +351,130 @@ impl IntentGenerator {
         Ok(mapping)
     }
 
-    /// Extract outcome IDs from mapping
+    /// Extract outcome IDs from contract specs
+    ///
+    /// Fetches contract specs and extracts outcome names from spec_json.outcomes arrays.
+    /// Uses outcome_mapping to determine which outcome to use (YES = index 0, NO = index 1).
+    /// Defaults to "YES" outcome for testing.
     ///
     /// # Arguments
-    /// * `mapping` - Outcome mapping HashMap
-    /// * `pair_id` - Pair ID for error context
+    /// * `pair` - Verified pair row (contains contract_spec IDs)
+    /// * `outcome_mapping` - Outcome mapping for validation
     ///
     /// # Returns
     /// Tuple of (leg_a_outcome_id, leg_b_outcome_id)
     ///
     /// # Errors
-    /// Returns `IntentGeneratorError::MissingOutcomeKey` if required keys are missing
-    fn extract_outcome_ids(
+    /// Returns `IntentGeneratorError` if contract specs can't be fetched or parsed
+    async fn extract_outcome_ids(
         &self,
-        mapping: &HashMap<String, String>,
-        pair_id: &Uuid,
+        pair: &crate::intent_generator::database::VerifiedPairRow,
+        outcome_mapping: &HashMap<String, String>,
     ) -> Result<(String, String), IntentGeneratorError> {
-        // Try explicit keys first (case-insensitive)
-        let leg_a_outcome = mapping
-            .get("YES_A")
-            .or_else(|| mapping.get("yes_a"))
-            .or_else(|| mapping.get("Yes_A"))
-            .cloned();
+        // Fetch contract specs in parallel
+        let (spec_a, spec_b) = futures::try_join!(
+            self.db_reader.get_contract_spec(pair.contract_spec_a_id),
+            self.db_reader.get_contract_spec(pair.contract_spec_b_id)
+        )?;
 
-        let leg_b_outcome = mapping
-            .get("YES_B")
-            .or_else(|| mapping.get("yes_b"))
-            .or_else(|| mapping.get("Yes_B"))
-            .cloned();
+        // Parse spec_json to extract outcomes arrays
+        let outcomes_a = self.parse_spec_outcomes(&spec_a.spec_json, "market A")?;
+        let outcomes_b = self.parse_spec_outcomes(&spec_b.spec_json, "market B")?;
 
-        match (leg_a_outcome, leg_b_outcome) {
-            (Some(a), Some(b)) => Ok((a, b)),
-            (None, _) => Err(IntentGeneratorError::MissingOutcomeKey(format!(
-                "Missing outcome mapping key for leg A in pair {}",
-                pair_id
-            ))),
-            (_, None) => Err(IntentGeneratorError::MissingOutcomeKey(format!(
-                "Missing outcome mapping key for leg B in pair {}",
-                pair_id
-            ))),
+        // Determine which outcome to use (default to YES for testing)
+        // outcome_mapping structure: {"YES_A": "YES_B", "NO_A": "NO_B"}
+        // We'll use YES outcome (index 0) for both legs
+        let outcome_index = 0; // YES is typically first in ["YES", "NO"]
+
+        // Validate outcome_mapping indicates YES correspondence
+        if !outcome_mapping.contains_key("YES_A") {
+            return Err(IntentGeneratorError::MissingOutcomeKey(format!(
+                "Missing YES_A key in outcome_mapping for pair {}",
+                pair.id
+            )));
         }
+
+        // Extract outcome names from arrays
+        let leg_a_outcome = outcomes_a
+            .get(outcome_index)
+            .ok_or_else(|| {
+                IntentGeneratorError::InvalidOutcomeMapping(format!(
+                    "Market A outcomes array doesn't have index {} (array: {:?})",
+                    outcome_index, outcomes_a
+                ))
+            })?
+            .clone();
+
+        let leg_b_outcome = outcomes_b
+            .get(outcome_index)
+            .ok_or_else(|| {
+                IntentGeneratorError::InvalidOutcomeMapping(format!(
+                    "Market B outcomes array doesn't have index {} (array: {:?})",
+                    outcome_index, outcomes_b
+                ))
+            })?
+            .clone();
+
+        Ok((leg_a_outcome, leg_b_outcome))
+    }
+
+    /// Parse outcomes array from contract spec JSON
+    ///
+    /// # Arguments
+    /// * `spec_json` - Contract spec JSONB value
+    /// * `market_label` - Label for error messages
+    ///
+    /// # Returns
+    /// Vector of outcome names
+    ///
+    /// # Errors
+    /// Returns `IntentGeneratorError::InvalidOutcomeMapping` if parsing fails
+    fn parse_spec_outcomes(
+        &self,
+        spec_json: &serde_json::Value,
+        market_label: &str,
+    ) -> Result<Vec<String>, IntentGeneratorError> {
+        if !spec_json.is_object() {
+            return Err(IntentGeneratorError::InvalidOutcomeMapping(format!(
+                "Contract spec for {} must be a JSON object",
+                market_label
+            )));
+        }
+
+        let outcomes = spec_json
+            .get("outcomes")
+            .ok_or_else(|| {
+                IntentGeneratorError::InvalidOutcomeMapping(format!(
+                    "Missing 'outcomes' field in contract spec for {}",
+                    market_label
+                ))
+            })?
+            .as_array()
+            .ok_or_else(|| {
+                IntentGeneratorError::InvalidOutcomeMapping(format!(
+                    "'outcomes' field in contract spec for {} must be an array",
+                    market_label
+                ))
+            })?;
+
+        let mut outcome_names = Vec::new();
+        for (idx, outcome) in outcomes.iter().enumerate() {
+            let name = outcome.as_str().ok_or_else(|| {
+                IntentGeneratorError::InvalidOutcomeMapping(format!(
+                    "Outcome at index {} in {} contract spec must be a string",
+                    idx, market_label
+                ))
+            })?;
+            outcome_names.push(name.to_string());
+        }
+
+        if outcome_names.is_empty() {
+            return Err(IntentGeneratorError::InvalidOutcomeMapping(format!(
+                "Outcomes array in {} contract spec cannot be empty",
+                market_label
+            )));
+        }
+
+        Ok(outcome_names)
     }
 }

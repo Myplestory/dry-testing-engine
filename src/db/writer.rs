@@ -54,23 +54,22 @@ impl DatabaseWriter {
     /// Write order immediately (need DB ID for tracking)
     pub async fn write_order(&self, order: &crate::types::order::Order) -> Result<uuid::Uuid> {
         // Insert order with ON CONFLICT DO NOTHING for idempotency
-        // Note: Database schema uses user_id, but we use customer_id in our types
-        // For now, using customer_id as user_id (schema alignment issue to fix separately)
+        // Database schema uses customer_id (not user_id)
         let order_id = sqlx::query_scalar::<_, Uuid>(
             r#"
             INSERT INTO orders (
-                user_id, strategy_id, pair_id, leg, venue, venue_market_id, venue_outcome_id,
+                customer_id, strategy_id, pair_id, leg, venue, venue_market_id, venue_outcome_id,
                 client_order_id, venue_order_id, side, limit_price_int, price_scale,
                 size_int, size_scale, status, filled_size_int,
                 created_at, updated_at
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-            ON CONFLICT (user_id, venue, client_order_id) DO UPDATE
+            ON CONFLICT (customer_id, venue, client_order_id) DO UPDATE
             SET updated_at = EXCLUDED.updated_at
             RETURNING id
             "#,
         )
-        .bind(order.customer_id) // Using customer_id as user_id (schema alignment issue)
+        .bind(order.customer_id)
         .bind(order.strategy_id)
         .bind(order.pair_id)
         .bind(<crate::types::order::OrderLeg as Into<&str>>::into(

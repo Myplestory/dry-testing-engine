@@ -2,10 +2,24 @@
 //!
 //! Tests the complete order flow from intent generation to execution completion.
 //! Requires a database connection configured in .env file.
+//!
+//! # Usage
+//!
+//! ```bash
+//! # Set logging level for visibility
+//! export RUST_LOG=dry_testing_engine=debug
+//!
+//! # Run all end-to-end tests
+//! cargo test --test end_to_end -- --nocapture
+//!
+//! # Run specific test
+//! cargo test --test end_to_end test_complete_execution_flow -- --nocapture
+//! ```
 
 use dry_testing_engine::{
-    DryTestingEngine, IntentGenerator, TestConfig, DatabaseReader,
+    DryTestingEngine, IntentGenerator, TestConfig,
 };
+use dry_testing_engine::intent_generator::database::{DatabaseReader, VerifiedPairRow};
 use sqlx::PgPool;
 use uuid::Uuid;
 use std::env;
@@ -41,7 +55,7 @@ async fn test_complete_execution_flow() -> Result<(), Box<dyn std::error::Error>
     
     // Query for active verified pairs
     let db_reader = DatabaseReader::new(pool.clone());
-    let active_pairs = db_reader.list_active_pairs(5).await?; // Get up to 5 pairs
+    let active_pairs: Vec<VerifiedPairRow> = db_reader.list_active_pairs(5).await?; // Get up to 5 pairs
     
     if active_pairs.is_empty() {
         eprintln!("⚠️  No active verified pairs found in database");
@@ -125,7 +139,7 @@ async fn test_single_intent_execution() -> Result<(), Box<dyn std::error::Error>
     
     // Query for a single active verified pair
     let db_reader = DatabaseReader::new(pool.clone());
-    let active_pairs = db_reader.list_active_pairs(1).await?;
+    let active_pairs: Vec<VerifiedPairRow> = db_reader.list_active_pairs(1).await?;
     
     let pair_id = active_pairs.first()
         .ok_or("No active verified pairs found in database")?
@@ -182,7 +196,7 @@ async fn test_batch_intent_execution() -> Result<(), Box<dyn std::error::Error>>
     
     // Query for multiple active verified pairs
     let db_reader = DatabaseReader::new(pool.clone());
-    let active_pairs = db_reader.list_active_pairs(10).await?; // Get up to 10 pairs
+    let active_pairs: Vec<VerifiedPairRow> = db_reader.list_active_pairs(10).await?; // Get up to 10 pairs
     
     if active_pairs.is_empty() {
         eprintln!("⚠️  No active verified pairs found in database");
@@ -215,6 +229,9 @@ async fn test_batch_intent_execution() -> Result<(), Box<dyn std::error::Error>>
     println!("   ✅ Generated {} intents", intents.len());
     if !errors.is_empty() {
         println!("   ⚠️  {} errors during generation", errors.len());
+        for (pair_id, err) in &errors {
+            eprintln!("      Pair {}: {}", pair_id, err);
+        }
     }
     
     // Enqueue all intents

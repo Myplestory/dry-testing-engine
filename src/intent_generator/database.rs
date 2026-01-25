@@ -21,6 +21,8 @@ pub struct VerifiedPairRow {
     pub pair_key: String,
     pub market_a_id: Uuid,
     pub market_b_id: Uuid,
+    pub contract_spec_a_id: Uuid,
+    pub contract_spec_b_id: Uuid,
     pub outcome_mapping: Value, // JSONB
     pub verdict: String,        // pair_verdict enum
     pub is_current: bool,
@@ -57,6 +59,13 @@ pub struct ScopeRow {
     pub id: Uuid,
     pub customer_id: Uuid,
     pub name: String,
+}
+
+/// Contract spec row (for outcome extraction)
+#[derive(Debug, Clone, FromRow)]
+pub struct ContractSpecRow {
+    pub id: Uuid,
+    pub spec_json: Value, // JSONB
 }
 
 /// Database reader with timeout handling
@@ -121,7 +130,8 @@ impl DatabaseReader {
             r#"
             SELECT 
                 id, pair_key, market_a_id, market_b_id,
-                outcome_mapping, verdict, is_current, is_active,
+                contract_spec_a_id, contract_spec_b_id,
+                outcome_mapping, verdict::TEXT as verdict, is_current, is_active,
                 created_at, updated_at
             FROM verified_pairs
             WHERE id = $1
@@ -175,7 +185,8 @@ impl DatabaseReader {
             r#"
             SELECT 
                 id, pair_key, market_a_id, market_b_id,
-                outcome_mapping, verdict, is_current, is_active,
+                contract_spec_a_id, contract_spec_b_id,
+                outcome_mapping, verdict::TEXT as verdict, is_current, is_active,
                 created_at, updated_at
             FROM verified_pairs
             WHERE is_current = true AND is_active = true
@@ -368,5 +379,151 @@ impl DatabaseReader {
             .ok_or_else(|| IntentGeneratorError::ScopeNotFound(customer_id))?;
 
         Ok(scope)
+    }
+
+    /// Setup test customer, scope, and strategy (for testing)
+    ///
+    /// Creates the full dependency chain: user → customer → scope → strategy.
+    /// Uses 'pro' tier to allow trade execution (free tier is not allowed).
+    /// Uses empty filters `{}` for scope since filters are not used by execution engine.
+    /// All operations are idempotent (ON CONFLICT handling).
+    ///
+    /// **This should be called once in test setup, not during execution benchmarking.**
+    ///
+    /// # Arguments
+    /// * `customer_id` - Customer UUID (will be created if doesn't exist)
+    ///
+    /// # Returns
+    /// Tuple of (customer_id, scope_id, strategy_id) for reuse in tests
+    ///
+    /// # Errors
+    /// Returns `IntentGeneratorError` for database errors or timeouts
+    pub async fn setup_test_customer_scope_strategy(
+        &self,
+        customer_id: Uuid,
+    ) -> Result<(Uuid, Uuid, Uuid), IntentGeneratorError> {
+        debug!(
+            "Setting up test customer, scope, and strategy for customer: {}",
+            customer_id
+        );
+
+        // Step 1: Create or get test user (tier: 'pro' to allow execution)
+        let user_email = format!("test_{}@drytest.local", customer_id);
+        let user_id = {
+            let query = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO users (email, tier, status)
+                VALUES ($1, 'pro', 'active')
+                ON CONFLICT (email) DO UPDATE SET id = users.id
+                RETURNING id
+                "#,
+            )
+            .bind(&user_email);
+
+            timeout(self.query_timeout, query.fetch_one(&self.pool))
+                .await
+                .map_err(|_| IntentGeneratorError::QueryTimeout)?
+                .map_err(|e| {
+                    IntentGeneratorError::InvalidConfig(format!("Database error creating user: {}", e))
+                })?
+        };
+
+        debug!("Created or found test user: {} (email: {})", user_id, user_email);
+
+        // Step 2: Create or get test customer (tier: 'pro' to allow execution)
+        let customer_id_actual = {
+            let query = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO customers (id, user_id, email, tier)
+                VALUES ($1, $2, $3, 'pro')
+                ON CONFLICT (user_id) DO UPDATE SET id = customers.id
+                RETURNING id
+                "#,
+            )
+            .bind(customer_id)
+            .bind(user_id)
+            .bind(&user_email);
+
+            timeout(self.query_timeout, query.fetch_one(&self.pool))
+                .await
+                .map_err(|_| IntentGeneratorError::QueryTimeout)?
+                .map_err(|e| {
+                    IntentGeneratorError::InvalidConfig(format!("Database error creating customer: {}", e))
+                })?
+        };
+
+        debug!("Created or found test customer: {}", customer_id_actual);
+
+        // Step 3: Create or get test scope (empty filters)
+        let scope_id = {
+            let query = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                INSERT INTO scopes (customer_id, name, filter_json, is_active)
+                VALUES ($1, 'test_scope', '{}'::jsonb, true)
+                ON CONFLICT (customer_id, name) DO UPDATE SET id = scopes.id
+                RETURNING id
+                "#,
+            )
+            .bind(customer_id_actual);
+
+            timeout(self.query_timeout, query.fetch_one(&self.pool))
+                .await
+                .map_err(|_| IntentGeneratorError::QueryTimeout)?
+                .map_err(|e| {
+                    IntentGeneratorError::InvalidConfig(format!("Database error creating scope: {}", e))
+                })?
+        };
+
+        debug!("Created or found test scope: {}", scope_id);
+
+        // Step 4: Create or get test strategy
+        let strategy = self
+            .get_or_create_test_strategy(customer_id_actual, scope_id)
+            .await?;
+
+        debug!(
+            "Setup complete: customer={}, scope={}, strategy={}",
+            customer_id_actual, scope_id, strategy.id
+        );
+
+        Ok((customer_id_actual, scope_id, strategy.id))
+    }
+
+    /// Get contract spec by ID
+    ///
+    /// # Arguments
+    /// * `spec_id` - Contract spec UUID
+    ///
+    /// # Returns
+    /// Contract spec row with spec_json
+    ///
+    /// # Errors
+    /// Returns `IntentGeneratorError` for database errors or timeouts
+    pub async fn get_contract_spec(
+        &self,
+        spec_id: Uuid,
+    ) -> Result<ContractSpecRow, IntentGeneratorError> {
+        let query = sqlx::query_as::<_, ContractSpecRow>(
+            r#"
+            SELECT id, spec_json
+            FROM contract_specs
+            WHERE id = $1
+            "#,
+        )
+        .bind(spec_id);
+
+        timeout(self.query_timeout, query.fetch_one(&self.pool))
+            .await
+            .map_err(|_| IntentGeneratorError::QueryTimeout)?
+            .map_err(|e| {
+                if matches!(e, sqlx::Error::RowNotFound) {
+                    IntentGeneratorError::InvalidConfig(format!(
+                        "Contract spec not found: {}",
+                        spec_id
+                    ))
+                } else {
+                    IntentGeneratorError::InvalidConfig(format!("Database error: {}", e))
+                }
+            })
     }
 }
