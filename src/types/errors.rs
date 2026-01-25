@@ -57,9 +57,6 @@ pub enum DryTestingError {
     #[error("Execution not found: {0}")]
     ExecutionNotFound(uuid::Uuid),
 
-    #[error("Queue full")]
-    QueueFull,
-
     #[error("Unknown venue: {0}")]
     UnknownVenue(String),
 
@@ -68,14 +65,15 @@ pub enum DryTestingError {
 
     #[error("Fixed-point arithmetic error: {0}")]
     FixedPoint(#[from] FixedPointError),
+
+    #[error("Intent generator error: {0}")]
+    IntentGenerator(#[from] crate::intent_generator::errors::IntentGeneratorError),
 }
 
-/// Lane-specific errors
+/// Lane-specific errors (obsolete - kept for compatibility)
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum LaneError {
-    #[error("Queue full")]
-    QueueFull,
-
     #[error("Lane not initialized")]
     LaneNotInitialized,
 

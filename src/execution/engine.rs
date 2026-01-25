@@ -164,4 +164,20 @@ impl DryTestingEngine {
         info!("Recovery complete");
         Ok(())
     }
+
+    /// Get database pool (for intent generator)
+    ///
+    /// # Returns
+    /// Reference to the database connection pool
+    pub fn db(&self) -> &Arc<PgPool> {
+        &self.db
+    }
+
+    /// Get router (for enqueueing intents)
+    ///
+    /// # Returns
+    /// Reference to the execution lane router
+    pub fn router(&self) -> &Arc<ExecutionLaneRouter> {
+        &self.router
+    }
 }

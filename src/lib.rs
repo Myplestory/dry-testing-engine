@@ -15,6 +15,7 @@ pub mod coordinator;
 pub mod core;
 pub mod db;
 pub mod execution;
+pub mod intent_generator;
 pub mod recovery;
 pub mod routing;
 pub mod state_machine;
@@ -22,4 +23,5 @@ pub mod types;
 pub mod venue;
 
 pub use execution::engine::DryTestingEngine;
+pub use intent_generator::{IntentGenerator, IntentGeneratorError, TestConfig};
 pub use types::errors::{DryTestingError, Result};
