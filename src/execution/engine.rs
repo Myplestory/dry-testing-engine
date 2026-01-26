@@ -37,7 +37,14 @@ pub struct DryTestingEngine {
 }
 
 impl DryTestingEngine {
-    /// Create a new dry testing engine
+    /// Create a new dry testing engine with its own database pool
+    ///
+    /// The engine will create a new database connection pool from the `DATABASE_URL`
+    /// environment variable.
+    ///
+    /// # Returns
+    /// * `Ok(Self)` - Engine initialized successfully
+    /// * `Err(DryTestingError)` - Initialization failed
     pub async fn new() -> Result<Self> {
         info!("Initializing dry testing engine...");
 
@@ -51,6 +58,23 @@ impl DryTestingEngine {
                 .await
                 .map_err(DryTestingError::Database)?,
         );
+
+        Self::with_pool(db).await
+    }
+
+    /// Create a new dry testing engine using a provided database pool
+    ///
+    /// This method allows sharing a database pool between the engine and other
+    /// components (e.g., intent generator in tests), reducing connection usage.
+    ///
+    /// # Arguments
+    /// * `db` - Shared database connection pool
+    ///
+    /// # Returns
+    /// * `Ok(Self)` - Engine initialized successfully
+    /// * `Err(DryTestingError)` - Initialization failed
+    pub async fn with_pool(db: Arc<PgPool>) -> Result<Self> {
+        info!("Initializing dry testing engine with provided pool...");
 
         // Initialize components
         let order_router = Arc::new(OrderRouter::new());

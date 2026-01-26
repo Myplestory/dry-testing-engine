@@ -23,6 +23,7 @@ use dry_testing_engine::intent_generator::database::{DatabaseReader, VerifiedPai
 use sqlx::PgPool;
 use uuid::Uuid;
 use std::env;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber;
 
@@ -65,11 +66,11 @@ async fn test_complete_execution_flow() -> Result<(), Box<dyn std::error::Error>
     
     println!("✅ Found {} active verified pairs", active_pairs.len());
     
-    // Create engine
-    let engine = DryTestingEngine::new().await?;
-    println!("✅ Engine initialized");
+    // Create engine with shared pool (reduces connection usage)
+    let engine = DryTestingEngine::with_pool(Arc::new(pool.clone())).await?;
+    println!("✅ Engine initialized with shared pool");
     
-    // Create generator
+    // Create generator with same pool
     let config = TestConfig::default();
     let generator = IntentGenerator::new(pool, config)?;
     
@@ -157,10 +158,10 @@ async fn test_single_intent_execution() -> Result<(), Box<dyn std::error::Error>
     println!("   Customer ID: {}", customer_id);
     println!("   Strategy ID: {}", strategy_id);
     
-    // Create engine
-    let engine = DryTestingEngine::new().await?;
+    // Create engine with shared pool (reduces connection usage)
+    let engine = DryTestingEngine::with_pool(Arc::new(pool.clone())).await?;
     
-    // Generate intent
+    // Generate intent (using same pool)
     let config = TestConfig::default();
     let generator = IntentGenerator::new(pool, config)?;
     let intent = generator.generate_from_pair_id(pair_id, customer_id, strategy_id).await?;
@@ -206,10 +207,10 @@ async fn test_batch_intent_execution() -> Result<(), Box<dyn std::error::Error>>
     println!("📦 Testing batch intent execution");
     println!("   Found {} active pairs", active_pairs.len());
     
-    // Create engine
-    let engine = DryTestingEngine::new().await?;
+    // Create engine with shared pool (reduces connection usage)
+    let engine = DryTestingEngine::with_pool(Arc::new(pool.clone())).await?;
     
-    // Create generator
+    // Create generator with same pool
     let config = TestConfig::default();
     let generator = IntentGenerator::new(pool, config)?;
     

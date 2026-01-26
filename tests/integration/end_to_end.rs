@@ -9,6 +9,7 @@ use dry_testing_engine::{
 use sqlx::PgPool;
 use uuid::Uuid;
 use std::env;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber;
 
@@ -51,11 +52,11 @@ async fn test_complete_execution_flow() -> Result<(), Box<dyn std::error::Error>
     
     println!("✅ Found {} active verified pairs", active_pairs.len());
     
-    // Create engine
-    let engine = DryTestingEngine::new().await?;
-    println!("✅ Engine initialized");
+    // Create engine with shared pool (reduces connection usage)
+    let engine = DryTestingEngine::with_pool(Arc::new(pool.clone())).await?;
+    println!("✅ Engine initialized with shared pool");
     
-    // Create generator
+    // Create generator with same pool
     let config = TestConfig::default();
     let generator = IntentGenerator::new(pool, config)?;
     
@@ -108,9 +109,12 @@ async fn test_complete_execution_flow() -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Test single intent execution with detailed logging
+/// Test single intent execution with detailed logging and benchmarking
 #[tokio::test]
 async fn test_single_intent_execution() -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Instant;
+    
+    let test_start = Instant::now();
     init_tracing();
     
     // Load .env file
@@ -121,44 +125,132 @@ async fn test_single_intent_execution() -> Result<(), Box<dyn std::error::Error>
         .expect("DATABASE_URL must be set in .env file");
     
     // Create database pool
-    let pool = PgPool::connect(&database_url).await?;
+    let setup_start = Instant::now();
+    let pool = match PgPool::connect(&database_url).await {
+        Ok(p) => {
+            let setup_time = setup_start.elapsed();
+            println!("✅ Connected to database (⏱️  {:?})", setup_time);
+            p
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to connect to database: {:?}", e);
+            return Err(e.into());
+        }
+    };
     
     // Query for a single active verified pair
     let db_reader = DatabaseReader::new(pool.clone());
-    let active_pairs = db_reader.list_active_pairs(1).await?;
+    let query_start = Instant::now();
+    let active_pairs = match db_reader.list_active_pairs(1).await {
+        Ok(pairs) => {
+            let query_time = query_start.elapsed();
+            println!("✅ Queried active pairs (⏱️  {:?})", query_time);
+            pairs
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to query active pairs: {:?}", e);
+            return Err(e.into());
+        }
+    };
     
-    let pair_id = active_pairs.first()
-        .ok_or("No active verified pairs found in database")?
-        .id;
+    // Handle empty pairs gracefully (same pattern as other tests)
+    if active_pairs.is_empty() {
+        eprintln!("⚠️  No active verified pairs found in database");
+        eprintln!("   Skipping test - add active verified pairs to database first");
+        return Ok(());
+    }
     
+    let pair_id = active_pairs.first().unwrap().id;
     let customer_id = Uuid::new_v4();
     
     // Setup test data sequentially (once, before generation)
-    let (_customer_id, _scope_id, strategy_id) = db_reader
+    let setup_data_start = Instant::now();
+    let (_customer_id, _scope_id, strategy_id) = match db_reader
         .setup_test_customer_scope_strategy(customer_id)
-        .await?;
+        .await
+    {
+        Ok(result) => {
+            let setup_data_time = setup_data_start.elapsed();
+            println!("✅ Test customer, scope, strategy setup complete (⏱️  {:?})", setup_data_time);
+            result
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to setup test data: {:?}", e);
+            return Err(e.into());
+        }
+    };
     
     println!("🎯 Testing single intent execution");
     println!("   Pair ID: {}", pair_id);
     println!("   Customer ID: {}", customer_id);
     println!("   Strategy ID: {}", strategy_id);
     
-    // Create engine
-    let engine = DryTestingEngine::new().await?;
+    // Create engine with shared pool (reduces connection usage)
+    let engine_start = Instant::now();
+    let engine = match DryTestingEngine::with_pool(Arc::new(pool.clone())).await {
+        Ok(e) => {
+            let engine_time = engine_start.elapsed();
+            println!("✅ Engine initialized with shared pool (⏱️  {:?})", engine_time);
+            e
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to create engine: {:?}", e);
+            return Err(e.into());
+        }
+    };
     
-    // Generate intent
+    // Generate intent (using same pool)
     let config = TestConfig::default();
-    let generator = IntentGenerator::new(pool, config)?;
-    let intent = generator.generate_from_pair_id(pair_id, customer_id, strategy_id).await?;
+    let generator = match IntentGenerator::new(pool, config) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("❌ Failed to create generator: {:?}", e);
+            return Err(e.into());
+        }
+    };
     
-    println!("✅ Generated intent: {}", intent.intent_id);
+    let generation_start = Instant::now();
+    let intent = match generator.generate_from_pair_id(pair_id, customer_id, strategy_id).await {
+        Ok(i) => {
+            let generation_time = generation_start.elapsed();
+            println!("✅ Generated intent: {} (⏱️  {:?})", i.intent_id, generation_time);
+            i
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to generate intent: {:?}", e);
+            return Err(e.into());
+        }
+    };
     
     // Enqueue intent
-    engine.router().enqueue_intent(intent).await?;
-    println!("✅ Intent enqueued. Order flow starting...\n");
+    let enqueue_start = Instant::now();
+    match engine.router().enqueue_intent(intent).await {
+        Ok(_) => {
+            let enqueue_time = enqueue_start.elapsed();
+            println!("✅ Intent enqueued. Order flow starting... (⏱️  {:?})", enqueue_time);
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to enqueue intent: {:?}", e);
+            return Err(e.into());
+        }
+    }
     
     // Wait for execution
+    let execution_start = Instant::now();
     tokio::time::sleep(Duration::from_secs(5)).await;
+    let execution_time = execution_start.elapsed();
+    
+    // Print benchmark summary
+    let total_time = test_start.elapsed();
+    println!("\n📊 Execution Benchmark:");
+    println!("   Setup: {:?}", setup_start.elapsed());
+    println!("   Query: {:?}", query_start.elapsed());
+    println!("   Setup Data: {:?}", setup_data_start.elapsed());
+    println!("   Engine Init: {:?}", engine_start.elapsed());
+    println!("   Intent Generation: {:?}", generation_start.elapsed());
+    println!("   Enqueue: {:?}", enqueue_start.elapsed());
+    println!("   Execution Wait: {:?}", execution_time);
+    println!("   Total Test Time: {:?}", total_time);
     
     println!("\n✅ Single intent execution test completed");
     
@@ -192,10 +284,10 @@ async fn test_batch_intent_execution() -> Result<(), Box<dyn std::error::Error>>
     println!("📦 Testing batch intent execution");
     println!("   Found {} active pairs", active_pairs.len());
     
-    // Create engine
-    let engine = DryTestingEngine::new().await?;
+    // Create engine with shared pool (reduces connection usage)
+    let engine = DryTestingEngine::with_pool(Arc::new(pool.clone())).await?;
     
-    // Create generator
+    // Create generator with same pool
     let config = TestConfig::default();
     let generator = IntentGenerator::new(pool, config)?;
     

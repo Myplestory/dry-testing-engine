@@ -5,7 +5,7 @@ use crate::core::SequenceGenerator;
 use crate::types::errors::Result;
 use crate::types::execution::ArbExecutionIntent;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Routes execution intents to coordinator (sequence number assignment)
 pub struct ExecutionLaneRouter {
@@ -65,8 +65,30 @@ impl ExecutionLaneRouter {
         );
 
         // Delegate to coordinator (which spawns tasks directly)
-        self.coordinator.enqueue_intent(intent).await?;
-
-        Ok(())
+        let intent_id = intent.intent_id;
+        let enqueue_start = std::time::Instant::now();
+        match self.coordinator.enqueue_intent(intent).await {
+            Ok(_) => {
+                let enqueue_time = enqueue_start.elapsed();
+                // Record enqueue time in coordinator
+                self.coordinator.record_enqueue_time(intent_id, enqueue_time);
+                debug!(
+                    intent_id = %intent_id,
+                    enqueue_time_ms = enqueue_time.as_millis(),
+                    "Intent successfully enqueued to coordinator"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                let enqueue_time = enqueue_start.elapsed();
+                error!(
+                    intent_id = %intent_id,
+                    error = %e,
+                    enqueue_time_ms = enqueue_time.as_millis(),
+                    "Failed to enqueue intent to coordinator"
+                );
+                Err(e)
+            }
+        }
     }
 }

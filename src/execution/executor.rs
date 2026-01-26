@@ -10,7 +10,7 @@ use crate::types::venue::VenueType;
 use crate::venue::adapter::{VenueAdapter, VenueResponse};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Result of leg execution
 #[derive(Debug)]
@@ -98,11 +98,41 @@ impl VenueExecutor {
         );
 
         // Submit order to venue
-        let response = self
+        let submission_start = std::time::Instant::now();
+        let response = match self
             .venue_adapter
             .submit_order(order.clone(), self.submission_timeout)
             .await
-            .map_err(DryTestingError::Venue)?;
+        {
+            Ok(resp) => {
+                let submission_time = submission_start.elapsed();
+                // Record submission time in coordinator
+                self.coordinator
+                    .record_submission_time(intent_id, leg, submission_time);
+                debug!(
+                    intent_id = %intent_id,
+                    order_id = %order_id,
+                    leg = ?leg,
+                    venue = ?self.venue,
+                    submission_time_ms = submission_time.as_millis(),
+                    "Order submitted to venue"
+                );
+                resp
+            }
+            Err(e) => {
+                let submission_time = submission_start.elapsed();
+                error!(
+                    intent_id = %intent_id,
+                    order_id = %order_id,
+                    leg = ?leg,
+                    venue = ?self.venue,
+                    error = %e,
+                    submission_time_ms = submission_time.as_millis(),
+                    "Failed to submit order to venue"
+                );
+                return Err(DryTestingError::Venue(e));
+            }
+        };
 
         info!(
             intent_id = %intent_id,
@@ -114,8 +144,34 @@ impl VenueExecutor {
         );
 
         // Process response
-        self.process_venue_response(response, order, leg, intent_id)
-            .await?;
+        let process_start = std::time::Instant::now();
+        match self.process_venue_response(response, order, leg, intent_id).await {
+            Ok(_) => {
+                let process_time = process_start.elapsed();
+                // Record process time in coordinator
+                self.coordinator
+                    .record_process_time(intent_id, leg, process_time);
+                debug!(
+                    intent_id = %intent_id,
+                    order_id = %order_id,
+                    leg = ?leg,
+                    process_time_ms = process_time.as_millis(),
+                    "Venue response processed"
+                );
+            }
+            Err(e) => {
+                let process_time = process_start.elapsed();
+                error!(
+                    intent_id = %intent_id,
+                    order_id = %order_id,
+                    leg = ?leg,
+                    error = %e,
+                    process_time_ms = process_time.as_millis(),
+                    "Failed to process venue response"
+                );
+                return Err(e);
+            }
+        }
 
         // Determine result based on final order status
         let order_state = self.state_machine.get_order(order_id)?;

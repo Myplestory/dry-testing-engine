@@ -1,5 +1,6 @@
 //! Arbitrage execution coordinator implementation
 
+use crate::coordinator::timing::ExecutionTiming;
 use crate::db::DatabaseWriter;
 use crate::execution::executor::{LegExecutionResult, VenueExecutor};
 use crate::routing::OrderRouter;
@@ -12,7 +13,7 @@ use crate::types::venue::VenueType;
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 use uuid::Uuid;
@@ -36,6 +37,9 @@ pub struct ArbExecutionCoordinator {
 
     /// Database connection pool
     db: Arc<PgPool>,
+
+    /// Execution timing trackers
+    execution_timings: Arc<DashMap<Uuid, ExecutionTiming>>,
 }
 
 impl ArbExecutionCoordinator {
@@ -53,6 +57,7 @@ impl ArbExecutionCoordinator {
             venue_executors: Arc::new(DashMap::new()),
             db_writer,
             db,
+            execution_timings: Arc::new(DashMap::new()),
         })
     }
 
@@ -79,6 +84,10 @@ impl ArbExecutionCoordinator {
 
     /// Enqueue an execution intent
     pub async fn enqueue_intent(&self, intent: ArbExecutionIntent) -> Result<()> {
+        // Initialize timing tracker
+        let timing = ExecutionTiming::new(intent.intent_id);
+        self.execution_timings.insert(intent.intent_id, timing);
+
         info!(
             intent_id = %intent.intent_id,
             sequence = intent.sequence_number,
@@ -96,6 +105,9 @@ impl ArbExecutionCoordinator {
 
         // Generate client_order_ids for both legs
         let (client_order_id_a, client_order_id_b) = intent.generate_client_order_ids();
+
+        // Record order creation time
+        let order_creation_start = Instant::now();
 
         debug!(
             intent_id = %intent.intent_id,
@@ -154,9 +166,69 @@ impl ArbExecutionCoordinator {
             updated_at: chrono::Utc::now(),
         };
 
+        // Record order creation time
+        if let Some(mut timing) = self.execution_timings.get_mut(&intent.intent_id) {
+            timing.order_creation_time = Some(order_creation_start.elapsed());
+        }
+
         // Write orders to database immediately (need order_id for tracking)
-        let order_a_id = self.db_writer.write_order(&order_a).await?;
-        let order_b_id = self.db_writer.write_order(&order_b).await?;
+        let db_write_start = Instant::now();
+        let order_a_id = match self.db_writer.write_order(&order_a).await {
+            Ok(id) => {
+                let db_write_time = db_write_start.elapsed();
+                // Record DB write time for Order A
+                if let Some(mut timing) = self.execution_timings.get_mut(&intent.intent_id) {
+                    timing.db_write_time_a = Some(db_write_time);
+                }
+                debug!(
+                    intent_id = %intent.intent_id,
+                    order_id = %order_a.id,
+                    leg = "A",
+                    db_write_time_ms = db_write_time.as_millis(),
+                    "Order A written to database"
+                );
+                id
+            }
+            Err(e) => {
+                error!(
+                    intent_id = %intent.intent_id,
+                    order_id = %order_a.id,
+                    leg = "A",
+                    error = %e,
+                    "Failed to write order A to database"
+                );
+                return Err(e);
+            }
+        };
+        
+        let db_write_start_b = Instant::now();
+        let order_b_id = match self.db_writer.write_order(&order_b).await {
+            Ok(id) => {
+                let db_write_time = db_write_start_b.elapsed();
+                // Record DB write time for Order B
+                if let Some(mut timing) = self.execution_timings.get_mut(&intent.intent_id) {
+                    timing.db_write_time_b = Some(db_write_time);
+                }
+                debug!(
+                    intent_id = %intent.intent_id,
+                    order_id = %order_b.id,
+                    leg = "B",
+                    db_write_time_ms = db_write_time.as_millis(),
+                    "Order B written to database"
+                );
+                id
+            }
+            Err(e) => {
+                error!(
+                    intent_id = %intent.intent_id,
+                    order_id = %order_b.id,
+                    leg = "B",
+                    error = %e,
+                    "Failed to write order B to database"
+                );
+                return Err(e);
+            }
+        };
 
         // Update orders with database IDs
         let mut order_a = order_a;
@@ -214,8 +286,31 @@ impl ArbExecutionCoordinator {
             .await?;
 
         // Get venue executors
-        let executor_a = self.get_venue_executor(&intent.leg_a.venue)?;
-        let executor_b = self.get_venue_executor(&intent.leg_b.venue)?;
+        let executor_a = match self.get_venue_executor(&intent.leg_a.venue) {
+            Ok(exec) => exec,
+            Err(e) => {
+                error!(
+                    intent_id = %intent.intent_id,
+                    venue = ?intent.leg_a.venue,
+                    error = %e,
+                    "Failed to get venue executor for leg A"
+                );
+                return Err(e);
+            }
+        };
+        
+        let executor_b = match self.get_venue_executor(&intent.leg_b.venue) {
+            Ok(exec) => exec,
+            Err(e) => {
+                error!(
+                    intent_id = %intent.intent_id,
+                    venue = ?intent.leg_b.venue,
+                    error = %e,
+                    "Failed to get venue executor for leg B"
+                );
+                return Err(e);
+            }
+        };
 
         // Clone necessary data for spawned tasks
         let order_a_clone = order_a.clone();
@@ -407,6 +502,7 @@ impl ArbExecutionCoordinator {
                     Ok(Ok(LegExecutionResult::Filled))
                     | Ok(Ok(LegExecutionResult::Acknowledged)) => {
                         // Both succeeded - COMPLETED
+                        let completion_start = Instant::now();
                         info!(
                             intent_id = %intent_id,
                             "Both legs succeeded - execution COMPLETED"
@@ -417,6 +513,17 @@ impl ArbExecutionCoordinator {
                         };
                         self.update_execution(intent_id, other_leg, OrderStatus::Filled)
                             .await?;
+                        
+                        // Record completion time and print summary
+                        let completion_time = completion_start.elapsed();
+                        if let Some(mut timing) = self.execution_timings.get_mut(&intent_id) {
+                            timing.coordinator_completion_time = Some(completion_time);
+                            timing.end_time = Some(Instant::now());
+                            
+                            // Print comprehensive timing summary
+                            println!("\n{}", timing.format_summary());
+                        }
+                        
                         Ok(ArbExecutionStatus::Completed)
                     }
                     Ok(Ok(LegExecutionResult::Rejected)) | Ok(Err(_)) | Err(_) => {
@@ -527,5 +634,72 @@ impl ArbExecutionCoordinator {
         // TODO: Rebuild active_executions map
 
         Ok(())
+    }
+
+    /// Record submission time for a leg (called by executor)
+    pub(crate) fn record_submission_time(
+        &self,
+        intent_id: Uuid,
+        leg: OrderLeg,
+        duration: Duration,
+    ) {
+        if let Some(mut timing) = self.execution_timings.get_mut(&intent_id) {
+            match leg {
+                OrderLeg::A => timing.submission_time_a = Some(duration),
+                OrderLeg::B => timing.submission_time_b = Some(duration),
+            }
+        }
+    }
+
+    /// Record process time for a leg (called by executor)
+    pub(crate) fn record_process_time(
+        &self,
+        intent_id: Uuid,
+        leg: OrderLeg,
+        duration: Duration,
+    ) {
+        if let Some(mut timing) = self.execution_timings.get_mut(&intent_id) {
+            match leg {
+                OrderLeg::A => timing.process_time_a = Some(duration),
+                OrderLeg::B => timing.process_time_b = Some(duration),
+            }
+        }
+    }
+
+    /// Record state transition time for a leg (called by state machine)
+    pub(crate) fn record_state_transition_time(
+        &self,
+        intent_id: Uuid,
+        leg: OrderLeg,
+        duration: Duration,
+    ) {
+        if let Some(mut timing) = self.execution_timings.get_mut(&intent_id) {
+            match leg {
+                OrderLeg::A => timing.state_transition_time_a = Some(duration),
+                OrderLeg::B => timing.state_transition_time_b = Some(duration),
+            }
+        }
+    }
+
+    /// Record fill latency for a leg (called when fill is received)
+    pub(crate) fn record_fill_latency(
+        &self,
+        intent_id: Uuid,
+        leg: OrderLeg,
+        duration: Duration,
+    ) {
+        if let Some(mut timing) = self.execution_timings.get_mut(&intent_id) {
+            match leg {
+                OrderLeg::A => timing.fill_latency_a = Some(duration),
+                OrderLeg::B => timing.fill_latency_b = Some(duration),
+            }
+        }
+    }
+
+    /// Record enqueue time (called by router)
+    pub(crate) fn record_enqueue_time(&self, intent_id: Uuid, duration: Duration) {
+        if let Some(mut timing) = self.execution_timings.get_mut(&intent_id) {
+            timing.enqueue_time = Some(duration);
+        }
     }
 }
