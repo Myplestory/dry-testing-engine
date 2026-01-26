@@ -50,6 +50,10 @@ impl OrderStateMachine {
             "Processing state machine event"
         );
 
+        // Generate event_id for idempotency
+        let event_id = Some(uuid::Uuid::new_v4());
+        let client_order_id = order.client_order_id.clone();
+
         let transition = match event {
             EventSource::VenueAck {
                 venue_order_id,
@@ -64,6 +68,8 @@ impl OrderStateMachine {
                         to: OrderStatus::Submitted,
                         timestamp,
                         source: "venue_ack".to_string(),
+                        event_id,
+                        client_order_id,
                     }
                 } else {
                     return Err(StateMachineError::InvalidTransition(format!(
@@ -109,6 +115,8 @@ impl OrderStateMachine {
                     to: new_status,
                     timestamp,
                     source: format!("venue_fill_{}", trade_id),
+                    event_id,
+                    client_order_id,
                 }
             }
             EventSource::VenueReject {
@@ -124,6 +132,8 @@ impl OrderStateMachine {
                     to: OrderStatus::Rejected,
                     timestamp,
                     source: format!("venue_reject: {}", reason),
+                    event_id,
+                    client_order_id,
                 }
             }
             EventSource::CoordinatorTimeout {
@@ -138,6 +148,8 @@ impl OrderStateMachine {
                     to: OrderStatus::Canceled,
                     timestamp,
                     source: "coordinator_timeout".to_string(),
+                    event_id,
+                    client_order_id,
                 }
             }
             EventSource::CoordinatorCancel {
@@ -153,6 +165,8 @@ impl OrderStateMachine {
                     to: OrderStatus::Canceled,
                     timestamp,
                     source: format!("coordinator_cancel: {}", reason),
+                    event_id,
+                    client_order_id,
                 }
             }
         };
@@ -168,8 +182,11 @@ impl OrderStateMachine {
         );
 
         // Queue transition for DB write (batched)
+        // Solution 1: Get order_id from OrderState (may be local UUID initially, will be correct after DB write completes)
+        // If wrong initially, retry mechanism will fix it (Measure 4)
+        let order_id_for_queue = order.order_id;
         self.db_writer
-            .queue_transition(order_id, transition.clone())
+            .queue_transition(order_id_for_queue, transition.clone())
             .await?;
 
         Ok(transition)
@@ -196,6 +213,36 @@ impl OrderStateMachine {
     /// Restore order state (for recovery)
     pub async fn restore_order(&self, order: OrderState) -> Result<()> {
         self.active_orders.insert(order.order_id, order);
+        Ok(())
+    }
+
+    /// Update order_id in OrderState cache (called when DB write completes)
+    /// Looks up OrderState by client_order_id and updates the order_id field
+    pub async fn update_order_id(
+        &self,
+        client_order_id: &str,
+        new_order_id: Uuid,
+    ) -> Result<()> {
+        // Find OrderState by client_order_id (scan cache)
+        // Note: This is O(n) but acceptable since cache is small and this is background operation
+        for mut entry in self.active_orders.iter_mut() {
+            if entry.value().client_order_id == client_order_id {
+                entry.value_mut().order_id = new_order_id;
+                debug!(
+                    client_order_id = %client_order_id,
+                    old_order_id = %entry.value().order_id,
+                    new_order_id = %new_order_id,
+                    "Updated OrderState.order_id after DB write"
+                );
+                return Ok(());
+            }
+        }
+
+        // OrderState not found - log warning but don't fail (may have been cleaned up)
+        tracing::warn!(
+            client_order_id = %client_order_id,
+            "OrderState not found when updating order_id (may have been cleaned up)"
+        );
         Ok(())
     }
 }

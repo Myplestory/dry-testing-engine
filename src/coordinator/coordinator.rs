@@ -171,78 +171,129 @@ impl ArbExecutionCoordinator {
             timing.order_creation_time = Some(order_creation_start.elapsed());
         }
 
-        // Write orders to database immediately (need order_id for tracking)
-        let db_write_start = Instant::now();
-        let order_a_id = match self.db_writer.write_order(&order_a).await {
-            Ok(id) => {
-                let db_write_time = db_write_start.elapsed();
-                // Record DB write time for Order A
-                if let Some(mut timing) = self.execution_timings.get_mut(&intent.intent_id) {
-                    timing.db_write_time_a = Some(db_write_time);
-                }
-                debug!(
-                    intent_id = %intent.intent_id,
-                    order_id = %order_a.id,
-                    leg = "A",
-                    db_write_time_ms = db_write_time.as_millis(),
-                    "Order A written to database"
-                );
-                id
-            }
-            Err(e) => {
-                error!(
-                    intent_id = %intent.intent_id,
-                    order_id = %order_a.id,
-                    leg = "A",
-                    error = %e,
-                    "Failed to write order A to database"
-                );
-                return Err(e);
-            }
-        };
+        // Fire-and-forget order writes (Phase 3: 0-latency critical path)
+        // Spawn background tasks to write orders to database
+        // Execution continues immediately without blocking on DB writes
+        let db_writer_a = self.db_writer.clone();
+        let state_machine_a = self.state_machine.clone();
+        let order_a_clone = order_a.clone();
+        let client_order_id_a_clone = client_order_id_a.clone();
+        let intent_id_clone = intent.intent_id;
+        let execution_timings_a = self.execution_timings.clone();
         
-        let db_write_start_b = Instant::now();
-        let order_b_id = match self.db_writer.write_order(&order_b).await {
-            Ok(id) => {
-                let db_write_time = db_write_start_b.elapsed();
-                // Record DB write time for Order B
-                if let Some(mut timing) = self.execution_timings.get_mut(&intent.intent_id) {
-                    timing.db_write_time_b = Some(db_write_time);
+        tokio::spawn(async move {
+            let write_start = Instant::now();
+            match db_writer_a.write_order(&order_a_clone).await {
+                Ok(db_order_id) => {
+                    let write_time = write_start.elapsed();
+                    
+                    // Record DB write time
+                    if let Some(mut timing) = execution_timings_a.get_mut(&intent_id_clone) {
+                        timing.db_write_time_a = Some(write_time);
+                    }
+                    
+                    debug!(
+                        intent_id = %intent_id_clone,
+                        client_order_id = %client_order_id_a_clone,
+                        local_order_id = %order_a_clone.id,
+                        db_order_id = %db_order_id,
+                        leg = "A",
+                        db_write_time_ms = write_time.as_millis(),
+                        "Order A written to database (background)"
+                    );
+                    
+                    // Update OrderState.order_id in cache (Phase 4)
+                    if let Err(e) = state_machine_a
+                        .update_order_id(&client_order_id_a_clone, db_order_id)
+                        .await
+                    {
+                        error!(
+                            intent_id = %intent_id_clone,
+                            client_order_id = %client_order_id_a_clone,
+                            error = %e,
+                            "Failed to update OrderState.order_id for order A"
+                        );
+                    }
                 }
-                debug!(
-                    intent_id = %intent.intent_id,
-                    order_id = %order_b.id,
-                    leg = "B",
-                    db_write_time_ms = db_write_time.as_millis(),
-                    "Order B written to database"
-                );
-                id
+                Err(e) => {
+                    error!(
+                        intent_id = %intent_id_clone,
+                        client_order_id = %client_order_id_a_clone,
+                        order_id = %order_a_clone.id,
+                        leg = "A",
+                        error = %e,
+                        "Failed to write order A to database (will retry in background)"
+                    );
+                    // Note: Execution continues regardless of write failure (fire-and-forget)
+                }
             }
-            Err(e) => {
-                error!(
-                    intent_id = %intent.intent_id,
-                    order_id = %order_b.id,
-                    leg = "B",
-                    error = %e,
-                    "Failed to write order B to database"
-                );
-                return Err(e);
+        });
+        
+        let db_writer_b = self.db_writer.clone();
+        let state_machine_b = self.state_machine.clone();
+        let order_b_clone = order_b.clone();
+        let client_order_id_b_clone = client_order_id_b.clone();
+        let intent_id_clone_b = intent.intent_id;
+        let execution_timings_b = self.execution_timings.clone();
+        
+        tokio::spawn(async move {
+            let write_start = Instant::now();
+            match db_writer_b.write_order(&order_b_clone).await {
+                Ok(db_order_id) => {
+                    let write_time = write_start.elapsed();
+                    
+                    // Record DB write time
+                    if let Some(mut timing) = execution_timings_b.get_mut(&intent_id_clone_b) {
+                        timing.db_write_time_b = Some(write_time);
+                    }
+                    
+                    debug!(
+                        intent_id = %intent_id_clone_b,
+                        client_order_id = %client_order_id_b_clone,
+                        local_order_id = %order_b_clone.id,
+                        db_order_id = %db_order_id,
+                        leg = "B",
+                        db_write_time_ms = write_time.as_millis(),
+                        "Order B written to database (background)"
+                    );
+                    
+                    // Update OrderState.order_id in cache (Phase 4)
+                    if let Err(e) = state_machine_b
+                        .update_order_id(&client_order_id_b_clone, db_order_id)
+                        .await
+                    {
+                        error!(
+                            intent_id = %intent_id_clone_b,
+                            client_order_id = %client_order_id_b_clone,
+                            error = %e,
+                            "Failed to update OrderState.order_id for order B"
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        intent_id = %intent_id_clone_b,
+                        client_order_id = %client_order_id_b_clone,
+                        order_id = %order_b_clone.id,
+                        leg = "B",
+                        error = %e,
+                        "Failed to write order B to database (will retry in background)"
+                    );
+                    // Note: Execution continues regardless of write failure (fire-and-forget)
+                }
             }
-        };
+        });
 
-        // Update orders with database IDs
-        let mut order_a = order_a;
-        let mut order_b = order_b;
-        order_a.id = order_a_id;
-        order_b.id = order_b_id;
+        // Use local UUIDs for OrderState initially (will be updated when DB writes complete)
+        // Note: order_a.id and order_b.id are local UUIDs, not DB IDs yet
 
-        // Register orders with router
+        // Register orders with router (using local UUIDs initially)
         self.order_router.register_order(&order_a);
         self.order_router.register_order(&order_b);
 
-        // Create OrderState for state machine cache
+        // Create OrderState for state machine cache (using local UUIDs, will be updated when DB writes complete)
         let order_state_a = crate::types::order::OrderState {
-            order_id: order_a.id,
+            order_id: order_a.id, // Local UUID, will be updated to DB ID when write completes
             intent_id: intent.intent_id,
             leg: OrderLeg::A,
             client_order_id: client_order_id_a.clone(),
@@ -260,7 +311,7 @@ impl ArbExecutionCoordinator {
         };
 
         let order_state_b = crate::types::order::OrderState {
-            order_id: order_b.id,
+            order_id: order_b.id, // Local UUID, will be updated to DB ID when write completes
             intent_id: intent.intent_id,
             leg: OrderLeg::B,
             client_order_id: client_order_id_b.clone(),
@@ -281,7 +332,7 @@ impl ArbExecutionCoordinator {
         self.state_machine.restore_order(order_state_a).await?;
         self.state_machine.restore_order(order_state_b).await?;
 
-        // Create execution tracking
+        // Create execution tracking (using local UUIDs, will be updated when DB writes complete)
         self.create_execution(&intent, order_a.id, order_b.id)
             .await?;
 

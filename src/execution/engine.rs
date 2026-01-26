@@ -79,6 +79,11 @@ impl DryTestingEngine {
         // Initialize components
         let order_router = Arc::new(OrderRouter::new());
         let db_writer = Arc::new(DatabaseWriter::new(db.clone()).await?);
+        
+        // Start background tasks (Phase 8: Engine initialization)
+        db_writer.start_background_flush().await;
+        db_writer.start_retry_scheduler().await;
+        
         let state_machine =
             Arc::new(OrderStateMachine::new(order_router.clone(), db_writer.clone()).await?);
 

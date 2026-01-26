@@ -194,6 +194,12 @@ pub struct StateTransition {
 
     /// Source of transition (venue_ack, venue_fill, coordinator_timeout, etc.)
     pub source: String,
+
+    /// Unique event ID for idempotent retries (generated on creation)
+    pub event_id: Option<Uuid>,
+
+    /// Client order ID for retry lookup (enables order_id resolution on retry)
+    pub client_order_id: String,
 }
 
 /// Order record (matches database schema)
