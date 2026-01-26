@@ -63,7 +63,7 @@ impl DatabaseWriter {
                 size_int, size_scale, status, filled_size_int,
                 created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            VALUES ($1, $2, $3, $4::order_leg, $5::venue_type, $6, $7, $8, $9, $10::order_side, $11, $12, $13, $14, $15::order_status, $16, $17, $18)
             ON CONFLICT (customer_id, venue, client_order_id) DO UPDATE
             SET updated_at = EXCLUDED.updated_at
             RETURNING id
@@ -72,9 +72,10 @@ impl DatabaseWriter {
         .bind(order.customer_id)
         .bind(order.strategy_id)
         .bind(order.pair_id)
-        .bind(<crate::types::order::OrderLeg as Into<&str>>::into(
-            order.leg,
-        ))
+        .bind({
+            // Database enum is uppercase ('A', 'B') - keep as-is from OrderLeg
+            <crate::types::order::OrderLeg as Into<&str>>::into(order.leg)
+        })
         .bind(<crate::types::venue::VenueType as Into<String>>::into(
             order.venue.clone(),
         ))
