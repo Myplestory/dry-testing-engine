@@ -168,15 +168,27 @@ impl DryTestingEngine {
         Ok(())
     }
 
-    /// Graceful shutdown
-    async fn shutdown(&self) -> Result<()> {
-        info!("Performing graceful shutdown...");
+    /// Gracefully shutdown the engine and all background tasks
+    ///
+    /// This should be called before dropping the engine to ensure
+    /// background tasks are properly cleaned up. In production, this
+    /// is called on shutdown signals. In tests, this should be called
+    /// at the end of each test.
+    ///
+    /// # Returns
+    /// * `Ok(())` - Shutdown completed successfully
+    /// * `Err(DryTestingError)` - Shutdown failed
+    pub async fn shutdown(&self) -> Result<()> {
+        info!("Shutting down dry testing engine...");
 
-        // Stop accepting new intents
+        // Shutdown database writer background tasks
+        self.db_writer.shutdown().await?;
+
+        // Stop accepting new intents (coordinator will handle this)
         // Wait for in-flight executions to complete
-        // Flush pending database writes
+        // Flush pending database writes (handled by db_writer.shutdown())
 
-        info!("Shutdown complete");
+        info!("Dry testing engine shutdown complete");
         Ok(())
     }
 
