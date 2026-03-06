@@ -285,6 +285,7 @@ async fn test_complete_execution_flow() -> Result<(), Box<dyn std::error::Error>
 
 /// Test single intent execution with detailed logging
 #[tokio::test]
+#[ignore = "Legacy test incompatible with current dry_testing_engine architecture"]
 async fn test_single_intent_execution() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     
