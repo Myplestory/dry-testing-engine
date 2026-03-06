@@ -116,10 +116,10 @@ impl DryTestingEngine {
                     venue.clone(),
                     10,   // ack_latency_ms
                     50,   // fill_latency_ms
-                    0.05, // reject_probability
-                    0.95, // fill_probability
+                    500,  // reject_probability_bps (5.00%)
+                    9500, // fill_probability_bps (95.00%)
                 )
-                .with_partial_fill_probability(0.1),
+                .with_partial_fill_probability_bps(1000), // 10.00%
             );
 
             let executor = VenueExecutor::new(

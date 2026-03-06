@@ -12,10 +12,10 @@ use chrono::Utc;
 async fn test_simulator_ack() {
     let simulator = VenueSimulator::new(
         VenueType::Polymarket,
-        10, // 10ms ACK latency
-        100, // 100ms fill latency
-        0.0, // No rejections
-        0.0, // No fills
+        10,
+        100,
+        0,
+        0,
     );
     
     let order = Order {
@@ -57,8 +57,8 @@ async fn test_simulator_rejection() {
         VenueType::Polymarket,
         10,
         100,
-        1.0, // 100% rejection rate
-        0.0,
+        10_000,
+        0,
     );
     
     let order = Order {
@@ -98,10 +98,10 @@ async fn test_simulator_rejection() {
 async fn test_simulator_timeout() {
     let simulator = VenueSimulator::new(
         VenueType::Polymarket,
-        1000, // 1 second ACK latency
+        1000,
         2000,
-        0.0,
-        0.0,
+        0,
+        0,
     );
     
     let order = Order {

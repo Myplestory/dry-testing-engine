@@ -3,7 +3,8 @@
 //! This shows how to integrate connection tracking into the test suite
 //! to diagnose connection pool exhaustion issues.
 
-use super::connection_tracker::{
+mod connection_tracker;
+use connection_tracker::{
     ConnectionComponent, end_operation, log_component_summary, log_pool_state, start_operation,
 };
 use sqlx::PgPool;
