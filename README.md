@@ -5,7 +5,7 @@ README:
 
 A Rust execution engine for dry-run backtesting of order management system (OMS/EMS) flows against simulated prediction market venues. Built to validate order lifecycle correctness, fill state machine transitions, and multi-leg arbitrage coordination without touching real capital.
 
-Archived from [PolyEdge](https://polyedge.trade) OEMS infrastructure. Published as a reference implementation.
+Archived as [PolyEdge](https://polyedge.trade) infrastructure exploration. Published as a reference iterative implementation.
 
 ## What It Does
 
