@@ -98,4 +98,4 @@ tests/
 └── integration/
     └── end_to_end.rs      # Full DB-backed integration test
 License
-MIT OR Apache-2.0
+ALL RIGHTS RESERVED
